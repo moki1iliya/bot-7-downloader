@@ -37,6 +37,8 @@ ADMIN_IDS = {123456789}                  # آیدی عددی ادمین‌ها
 DOWNLOAD_DIR = Path("downloads"); DOWNLOAD_DIR.mkdir(exist_ok=True)
 CACHE_FILE = Path("cache.json")          # کش file_id — لینک تکراری = ارسال آنی ⚡
 COOKIES_FILE = Path("cookies.txt")       # اگر باشد، برای اینستاگرام/یوتیوب استفاده می‌شود
+INSTA_USERNAME = os.environ.get("INSTA_USERNAME", "")
+INSTA_PASSWORD = os.environ.get("INSTA_PASSWORD", "")
 MAX_FILE_MB = 49                         # با Local Bot API Server می‌توانید تا 1990 بگذارید
 MAX_CONCURRENT = 4
 HAS_ARIA2 = shutil.which("aria2c") is not None
@@ -188,7 +190,10 @@ def build_opts(quality: str, out_tmpl: str, hook) -> dict:
         "progress_hooks": [hook],
         "writethumbnail": True,
     }
-    if COOKIES_FILE.exists():
+    if INSTA_USERNAME and INSTA_PASSWORD:
+        opts["username"] = INSTA_USERNAME
+        opts["password"] = INSTA_PASSWORD
+    elif COOKIES_FILE.exists():
         opts["cookiefile"] = str(COOKIES_FILE)
     if HAS_ARIA2:
         # aria2c: دانلود ۱۶ اتصالی از هر سرور — جهش سرعت واقعی 🚀
