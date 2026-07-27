@@ -46,7 +46,7 @@ def back_panel(): return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 با�
 
 async def start(update, context):
     STATS["users"].add(update.effective_user.id)
-    await update.message.reply_text(f"سلام {update.effective_user.first_name} 👋\n\n🔥 <b>ربات دانلودر PRO v3</b>\nلینک بفرست! 🚀", parse_mode=ParseMode.HTML, reply_markup=main_panel(update.effective_user.id))
+    await update.message.reply_text(f"سلام {update.effective_user.first_name} 👋\n\n🔥 <b>ربات دانلودر PRO v3</b>\ک بفرست! 🚀", parse_mode=ParseMode.HTML, reply_markup=main_panel(update.effective_user.id))
 
 async def handle_text(update, context):
     uid = update.effective_user.id
@@ -60,14 +60,14 @@ async def handle_text(update, context):
         if insta_m:
             url = insta_m.group(0)
             chat_id = update.effective_chat.id
-            status = await context.bot.send_message(chat_id, "⏬ دانلود اینستاگرام...")
+            status = await context.bot.send_message(chat_id, "⏬ دانلود اینگرام...")
             asyncio.create_task(download_instagram(status, context, url, chat_id, update.message.message_id))
             return
         yt_m = YT_RE.search(text)
         if yt_m:
             url = yt_m.group(0)
             chat_id = update.effective_chat.id
-            status = await context.bot.send_message(chat_id, "⏬ دانلود...")
+            status = await context.bot.send_message(chat_id, "⏬ د...")
             asyncio.create_task(download_ytdlp(status, context, url, "best", chat_id, update.message.message_id))
             return
         return
