@@ -140,9 +140,9 @@ async def handle_text(update, context):
         m = URL_RE.search(text)
         if not m: return
         url = m.group(0)
-        chat_id = update.effective_chat.id
-        status = await context.bot.send_message(chat_id, "Fetching...")
-        asyncio.create_task(dl_ytdlp(status, context, url, "best", chat_id, update.message.message_id))
+        token = uuid.uuid4().hex[:10]
+        PENDING[token] = url
+        await update.message.reply_text("Choose quality:", reply_markup=quality_panel(token))
         return
 
     m = URL_RE.search(text)
