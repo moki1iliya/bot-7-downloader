@@ -117,7 +117,7 @@ def init_instagram() -> None:
 # UI
 # ------------------------------------------------------------------ #
 def main_panel(uid: int) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton("Help", callback_data="help"),
+    rows = [[InlineKeyboardButton("Hososhsvslp", callback_data="help"),
              InlineKeyboardButton("Status", callback_data="status")]]
     if uid in ADMIN_IDS:
         rows.append([InlineKeyboardButton("Admin", callback_data="admin")])
