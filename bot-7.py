@@ -232,8 +232,6 @@ async def dl_ytdlp(status, context, url, quality, chat_id, delete_msg_id=None):
     }
     if INSTA_RE.search(url) and COOKIES_FILE.exists():
         opts["cookiefile"] = str(COOKIES_FILE)
-    if HAS_ARIA2:
-        # aria2c disabled - causes hangs on Railway
     if quality == "audio":
         opts["format"] = "bestaudio/best"
         opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}]
