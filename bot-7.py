@@ -226,22 +226,21 @@ async def dl_ytdlp(status, context, url, quality, chat_id, delete_msg_id=None):
         "outtmpl": str(folder/"%(title).60s.%(ext)s"),
         "noplaylist": True, "quiet": True, "no_warnings": True,
         "retries": 3, "socket_timeout": 15,
-        "concurrent_fragment_downloads": 16,
+        "concurrent_fragment_downloads": 1,
         "max_filesize": MAX_FILE_MB*1024*1024,
         "progress_hooks": [hook],
     }
     if INSTA_RE.search(url) and COOKIES_FILE.exists():
         opts["cookiefile"] = str(COOKIES_FILE)
     if HAS_ARIA2:
-        opts["external_downloader"] = "aria2c"
-        opts["external_downloader_args"] = ["-x", "16", "-s", "16", "-k", "1M"]
+        # aria2c disabled - causes hangs on Railway
     if quality == "audio":
         opts["format"] = "bestaudio/best"
         opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}]
     elif quality in ("1080","720","480"):
-        opts["format"] = f"bv*[height<={quality}]+ba/b[height<={quality}]/best"
+        opts["format"] = f"best[height<={quality}][ext=mp4]/best[height<={quality}]/best"
     else:
-        opts["format"] = "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b"
+        opts["format"] = "best[ext=mp4]/best"
 
     try:
         await se(status, "Fetching...")
