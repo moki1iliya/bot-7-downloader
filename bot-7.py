@@ -17,7 +17,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 
 # ───────────── تنظیمات ─────────────
 BOT_TOKEN          = os.environ.get("BOT_TOKEN", "توکن-اینجا")
-ADMIN_IDS          = {123456789}
+ADMIN_IDS          = {7438138322}
 IG_USERNAME        = os.environ.get("INSTAGRAM_USERNAME", "")
 IG_PASSWORD        = os.environ.get("INSTAGRAM_PASSWORD", "")
 IG_SESSION_FILE    = Path("ig_session.json")
