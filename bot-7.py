@@ -20,6 +20,7 @@ ADMIN_IDS = {7438138322}
 DOWNLOAD_DIR = Path("downloads"); DOWNLOAD_DIR.mkdir(exist_ok=True)
 MAX_FILE_MB = 49
 HAS_ARIA2 = shutil.which("aria2c") is not None
+COOKIES_FILE = Path("cookies.txt")
 IG_USERNAME = os.environ.get("INSTAGRAM_USERNAME", "")
 IG_PASSWORD = os.environ.get("INSTAGRAM_PASSWORD", "")
 
@@ -167,6 +168,8 @@ async def dl_ytdlp(status, context, url, quality, chat_id, delete_msg_id=None):
         asyncio.run_coroutine_threadsafe(se(status, f"⏬ {progress_bar(pct)} {pct:.0f}%\n🚀 {spd:.1f} MB/s"), loop)
 
     opts = {"outtmpl": str(folder/"%(title).60s.%(ext)s"), "noplaylist": True, "quiet": True, "no_warnings": True, "retries": 3, "socket_timeout": 15, "concurrent_fragment_downloads": 16, "max_filesize": MAX_FILE_MB*1024*1024, "progress_hooks": [hook]}
+    if INSTA_RE.search(url) and COOKIES_FILE.exists():
+        opts["cookiefile"] = str(COOKIES_FILE)
     if HAS_ARIA2:
         opts["external_downloader"] = "aria2c"
         opts["external_downloader_args"] = ["-x", "16", "-s", "16", "-k", "1M"]
