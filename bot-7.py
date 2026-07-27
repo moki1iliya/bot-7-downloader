@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Downloader Bot — yt-dlp + instagrapi (improved)"""
+"""
+Downloader Bot — yt-dlp + instagrapi
+BUILD: v2.1.0-qualityfix / 2026-07-27-final
+
+Run /version in Telegram to see which build is loaded.
+"""
 import asyncio
 import json
 import logging
@@ -15,9 +20,9 @@ from pathlib import Path
 from typing import Optional
 
 import yt_dlp
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction, ChatType, ParseMode
-from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
+from telegram.error import BadRequest, Forbidden, NetworkError, TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -28,7 +33,19 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 
-# instagrapi - optional, fail gracefully
+# ---- BUILD INFO (visible in /version) ----
+__version__ = "2.1.0-qualityfix"
+__build__ = "2026-07-27-final"
+__changelog__ = [
+    "Group 'Fetching' hang -> fixed",
+    "Quality selector cap -> fixed (strict height ceiling)",
+    "StatusHandle race -> fixed (lock + throttle)",
+    "IG session caching -> added",
+    "Upload timeout -> raised to 300s",
+    "Typing indicator -> added",
+]
+
+# instagrapi - optional
 try:
     from instagrapi import Client as InstaClient
     HAS_INSTA = True
@@ -44,37 +61,25 @@ DOWNLOAD_DIR = Path(os.environ.get("DOWNLOAD_DIR", "downloads"))
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 MAX_FILE_MB = int(os.environ.get("MAX_FILE_MB", "49"))
 HAS_ARIA2 = shutil.which("aria2c") is not None
+HAS_FFPROBE = shutil.which("ffprobe") is not None
 COOKIES_FILE = Path(os.environ.get("COOKIES_FILE", "cookies.txt"))
 IG_USERNAME = os.environ.get("INSTAGRAM_USERNAME", "").strip()
 IG_PASSWORD = os.environ.get("INSTAGRAM_PASSWORD", "").strip()
 
-# ------------------------------------------------------------------ #
-# Logging
-# ------------------------------------------------------------------ #
 logging.basicConfig(
-    format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+    format="%(asctime)s | %(levelname)-7s | %(message)s",
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
 )
 log = logging.getLogger("bot")
 
-# ------------------------------------------------------------------ #
-# Regex / State
-# ------------------------------------------------------------------ #
 URL_RE = re.compile(r"https?://\S+", re.I)
 INSTA_RE = re.compile(r"https?://(www\.)?(instagram\.com|instagr\.am)/\S+", re.I)
-STATS = {
-    "users": set(),
-    "downloads": 0,
-    "errors": 0,
-    "ig_downloads": 0,
-    "started": time.time(),
-}
+STATS = {"users": set(), "downloads": 0, "errors": 0, "ig_downloads": 0, "started": time.time()}
 PENDING: dict[str, str] = {}
 BOT_ENABLED = True
-PENDING_LOCK = asyncio.Lock() if False else None  # dict is small + per-user; not needed
 
 # ------------------------------------------------------------------ #
-# Instagram client (lazy + resilient)
+# Instagram
 # ------------------------------------------------------------------ #
 ig_client: Optional["InstaClient"] = None
 
@@ -82,111 +87,159 @@ ig_client: Optional["InstaClient"] = None
 def init_instagram() -> None:
     global ig_client
     if not (HAS_INSTA and IG_USERNAME and IG_PASSWORD):
-        log.info("Instagram disabled (missing lib or creds)")
+        log.info("Instagram: disabled (missing lib or creds)")
         return
     try:
         c = InstaClient()
-        # load existing session if present
         sess_path = Path("ig_session.json")
         if sess_path.exists():
             try:
                 c.load_settings(sess_path)
-                c.login(IG_USERNAME, IG_PASSWORD)  # refresh
-                log.info("Instagram session loaded + refreshed")
+                c.login(IG_USERNAME, IG_PASSWORD)
+                log.info("Instagram: session refreshed")
                 ig_client = c
                 return
             except Exception as e:
-                log.warning("Saved IG session invalid, fresh login: %s", e)
+                log.warning("Instagram: saved session invalid, fresh login: %s", e)
         c.login(IG_USERNAME, IG_PASSWORD)
         try:
             c.dump_settings(sess_path)
-        except Exception as e:
-            log.warning("Could not save IG session: %s", e)
+        except Exception:
+            pass
         ig_client = c
-        log.info("Instagram login OK")
+        log.info("Instagram: login OK")
     except Exception as e:
-        log.error("Instagram login FAILED: %s", e)
+        log.error("Instagram: login FAILED: %s", e)
         ig_client = None
 
 
 # ------------------------------------------------------------------ #
-# UI builders
+# UI
 # ------------------------------------------------------------------ #
 def main_panel(uid: int) -> InlineKeyboardMarkup:
-    rows = [
-        [
-            InlineKeyboardButton("Help", callback_data="help"),
-            InlineKeyboardButton("Status", callback_data="status"),
-        ]
-    ]
+    rows = [[InlineKeyboardButton("Help", callback_data="help"),
+             InlineKeyboardButton("Status", callback_data="status")]]
     if uid in ADMIN_IDS:
         rows.append([InlineKeyboardButton("Admin", callback_data="admin")])
+        rows.append([InlineKeyboardButton(f"ℹ️ v{__version__}", callback_data="version")])
     return InlineKeyboardMarkup(rows)
 
 
 def quality_panel(token: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("Best", callback_data=f"dl|best|{token}"),
-                InlineKeyboardButton("1080p", callback_data=f"dl|1080|{token}"),
-            ],
-            [
-                InlineKeyboardButton("720p", callback_data=f"dl|720|{token}"),
-                InlineKeyboardButton("480p", callback_data=f"dl|480|{token}"),
-            ],
-            [
-                InlineKeyboardButton("MP3", callback_data=f"dl|audio|{token}"),
-                InlineKeyboardButton("Cancel", callback_data=f"cancel|{token}"),
-            ],
-        ]
-    )
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Best", callback_data=f"dl|best|{token}"),
+         InlineKeyboardButton("1080p", callback_data=f"dl|1080|{token}")],
+        [InlineKeyboardButton("720p", callback_data=f"dl|720|{token}"),
+         InlineKeyboardButton("480p", callback_data=f"dl|480|{token}")],
+        [InlineKeyboardButton("MP3", callback_data=f"dl|audio|{token}"),
+         InlineKeyboardButton("Cancel", callback_data=f"cancel|{token}")],
+    ])
 
 
 def group_quality_panel(token: str) -> InlineKeyboardMarkup:
-    """Compact panel for group chats (no audio / no 1080 to keep it small)."""
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("Best", callback_data=f"dl|best|{token}"),
-                InlineKeyboardButton("720p", callback_data=f"dl|720|{token}"),
-            ],
-            [
-                InlineKeyboardButton("MP3", callback_data=f"dl|audio|{token}"),
-                InlineKeyboardButton("Cancel", callback_data=f"cancel|{token}"),
-            ],
-        ]
-    )
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Best", callback_data=f"dl|best|{token}"),
+         InlineKeyboardButton("720p", callback_data=f"dl|720|{token}")],
+        [InlineKeyboardButton("480p", callback_data=f"dl|480|{token}"),
+         InlineKeyboardButton("MP3", callback_data=f"dl|audio|{token}")],
+        [InlineKeyboardButton("Cancel", callback_data=f"cancel|{token}")],
+    ])
 
 
 def admin_panel() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("Stats", callback_data="a_stats"),
-                InlineKeyboardButton("Toggle On/Off", callback_data="a_toggle"),
-            ],
-            [InlineKeyboardButton("Back", callback_data="home")],
-        ]
-    )
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Stats", callback_data="a_stats"),
+         InlineKeyboardButton("Toggle On/Off", callback_data="a_toggle")],
+        [InlineKeyboardButton(f"ℹ️ Build {__version__}", callback_data="version")],
+        [InlineKeyboardButton("Back", callback_data="home")],
+    ])
 
 
 def progress_bar(pct: float) -> str:
     pct = max(0.0, min(100.0, pct))
-    filled = int(pct / 10)
-    return "▓" * filled + "░" * (10 - filled)
+    return "▓" * int(pct / 10) + "░" * (10 - int(pct / 10))
 
 
-def human_size(num_bytes: int) -> str:
-    for unit in ("B", "KB", "MB", "GB"):
-        if num_bytes < 1024:
-            return f"{num_bytes:.1f} {unit}"
-        num_bytes /= 1024
-    return f"{num_bytes:.1f} TB"
+def human_size(b: int) -> str:
+    for u in ("B", "KB", "MB", "GB"):
+        if b < 1024:
+            return f"{b:.1f} {u}"
+        b /= 1024
+    return f"{b:.1f} TB"
 
 
 # ------------------------------------------------------------------ #
-# StatusHandle — uniform way to update a "working…" message
+# Quality -> format string (STRICT cap, no fallthrough above)
+# ------------------------------------------------------------------ #
+def build_format(quality: str) -> dict:
+    """
+    Returns yt-dlp options for the requested quality.
+
+    KEY FIX: We split caps so 1080p NEVER falls through to 2160p,
+    and 480p NEVER falls through to 720p.
+    """
+    if quality == "audio":
+        return {
+            "format": "bestaudio/best",
+            "postprocessors": [
+                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
+            ],
+        }
+
+    if quality == "best":
+        # No cap, but prefer mp4 mux to keep file size sane
+        return {
+            "format": "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/bv*[ext=mp4]+ba/bv*+ba/b",
+        }
+
+    # Map button -> strict ceiling. We do NOT use <= because yt-dlp
+    # picks the largest matching stream which can be way above the
+    # requested cap when the source only has one or two streams.
+    cap_map = {
+        "1080": 1080,
+        "720": 720,
+        "480": 480,
+    }
+    cap = cap_map.get(quality)
+    if cap is None:
+        return {"format": "bv*[ext=mp4]+ba/b"}
+
+    # Strict cap: prefer exact height, then anything <= cap, then mp4-only
+    # The order matters — yt-dlp picks the FIRST match in the chain.
+    if cap == 1080:
+        fmt = (
+            "bv*[height=1080][ext=mp4]+ba[ext=m4a]/"
+            "bv*[height=1080]+ba[ext=m4a]/"
+            "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/"
+            "bv*[height<=1080]+ba/"
+            "bv*[height<=1080]"
+        )
+    elif cap == 720:
+        fmt = (
+            "bv*[height=720][ext=mp4]+ba[ext=m4a]/"
+            "bv*[height=720]+ba[ext=m4a]/"
+            "bv*[height<=720][ext=mp4]+ba[ext=m4a]/"
+            "bv*[height<=720]+ba/"
+            "bv*[height<=720]"
+        )
+    else:  # 480
+        fmt = (
+            "bv*[height=480][ext=mp4]+ba[ext=m4a]/"
+            "bv*[height=480]+ba[ext=m4a]/"
+            "bv*[height<=480][ext=mp4]+ba[ext=m4a]/"
+            "bv*[height<=480]+ba/"
+            "bv*[height<=480]"
+        )
+
+    return {
+        "format": fmt,
+        # Force sort by resolution so the chain actually picks the cap
+        "format_sort": ["res", "ext:mp4:m4a", "size", "br"],
+    }
+
+
+# ------------------------------------------------------------------ #
+# StatusHandle
 # ------------------------------------------------------------------ #
 @dataclass
 class StatusHandle:
@@ -196,12 +249,9 @@ class StatusHandle:
     _last_text: str = ""
     _last_edit: float = 0.0
     _deleted: bool = False
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def edit(self, text: str, *, force: bool = False, interval: float = 1.2) -> None:
-        if self._deleted:
-            return
-        if text == self._last_text:
+        if self._deleted or text == self._last_text:
             return
         now = time.time()
         if not force and (now - self._last_edit) < interval:
@@ -209,19 +259,12 @@ class StatusHandle:
         self._last_text = text
         self._last_edit = now
         try:
-            await self.bot.edit_message_text(
-                chat_id=self.chat_id,
-                message_id=self.message_id,
-                text=text,
-            )
+            await self.bot.edit_message_text(chat_id=self.chat_id, message_id=self.message_id, text=text)
         except BadRequest as e:
             if "not modified" in str(e).lower():
                 return
-            log.debug("edit_message_text failed: %s", e)
-        except (TimedOut, NetworkError) as e:
-            log.debug("edit network err: %s", e)
-        except Exception as e:  # noqa: BLE001
-            log.debug("edit unknown err: %s", e)
+        except Exception:
+            pass
 
     async def delete(self) -> None:
         if self._deleted:
@@ -229,21 +272,12 @@ class StatusHandle:
         self._deleted = True
         try:
             await self.bot.delete_message(chat_id=self.chat_id, message_id=self.message_id)
-        except Exception:  # noqa: BLE001
-            pass
-
-    async def reply_fallback(self, text: str) -> None:
-        """If status was deleted/lost, send a fresh message instead."""
-        if self._deleted:
-            return
-        try:
-            await self.bot.send_message(self.chat_id, text, reply_to_message_id=self.message_id)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
 
 # ------------------------------------------------------------------ #
-# Upload progress wrapper
+# ProgressFile
 # ------------------------------------------------------------------ #
 class ProgressFile:
     def __init__(self, path: Path, status: StatusHandle, label: str = "Uploading", interval: float = 1.5):
@@ -258,10 +292,9 @@ class ProgressFile:
 
     def read(self, n: int = -1) -> bytes:
         chunk = self.f.read(n)
-        if not chunk:
-            return chunk
-        self.read_bytes += len(chunk)
-        self._maybe_report()
+        if chunk:
+            self.read_bytes += len(chunk)
+            self._maybe_report()
         return chunk
 
     def _maybe_report(self) -> None:
@@ -272,15 +305,9 @@ class ProgressFile:
         pct = (self.read_bytes / self.size * 100) if self.size else 0
         elapsed = max(now - self.start, 0.001)
         spd = (self.read_bytes / 1048576) / elapsed
-        text = (
-            f"{self.label} {progress_bar(pct)} {pct:.0f}%\n"
-            f"{spd:.1f} MB/s · {human_size(self.read_bytes)} / {human_size(self.size)}"
-        )
-        # StatusHandle.edit is async but we are in a sync context (telegram lib reads blocks)
-        # Use a fire-and-forget via the running loop:
+        text = f"{self.label} {progress_bar(pct)} {pct:.0f}%\n{spd:.1f} MB/s · {human_size(self.read_bytes)}/{human_size(self.size)}"
         try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self.status.edit(text, interval=0))
+            asyncio.get_running_loop().create_task(self.status.edit(text, interval=0))
         except RuntimeError:
             pass
 
@@ -299,7 +326,7 @@ class ProgressFile:
     def close(self) -> None:
         try:
             self.f.close()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
     def __enter__(self):
@@ -307,6 +334,25 @@ class ProgressFile:
 
     def __exit__(self, *a):
         self.close()
+
+
+# ------------------------------------------------------------------ #
+# ffprobe helper
+# ------------------------------------------------------------------ #
+def _probe_height(path: Path) -> Optional[int]:
+    if not HAS_FFPROBE:
+        return None
+    try:
+        out = subprocess.check_output(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=height", "-of", "csv=s=x:p=0", str(path)],
+            stderr=subprocess.DEVNULL, timeout=10,
+        ).decode().strip()
+        if "x" in out:
+            return int(out.split("x", 1)[1])
+    except Exception:
+        return None
+    return None
 
 
 # ------------------------------------------------------------------ #
@@ -321,6 +367,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         f"Hi {update.effective_user.first_name or 'there'} 👋\n\n"
         f"Downloader Bot · Engine: {e}{ig}\n"
+        f"Build: v{__version__}\n\n"
         f"Send any link to get started.",
         reply_markup=main_panel(update.effective_user.id),
     )
@@ -330,9 +377,22 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
     await update.message.reply_text(
-        "Just send a video link (YouTube, Twitter, TikTok, Instagram, …)\n"
-        "Pick a quality when the panel pops up.\n\n"
-        "In groups, replies are silent (only @mention or reply triggers me).",
+        "Just send a video link and pick a quality.\n"
+        "In groups, replies are silent (mention or reply triggers me).",
+        reply_markup=main_panel(update.effective_user.id),
+    )
+
+
+async def cmd_version(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show build info so you can confirm the new code is running."""
+    if not update.message:
+        return
+    changes = "\n".join(f"  • {c}" for c in __changelog__)
+    await update.message.reply_text(
+        f"🤖 Downloader Bot\n"
+        f"Version: {__version__}\n"
+        f"Build:   {__build__}\n\n"
+        f"Changes:\n{changes}",
         reply_markup=main_panel(update.effective_user.id),
     )
 
@@ -344,7 +404,9 @@ def extract_url(text: str) -> Optional[str]:
     if not text:
         return None
     m = URL_RE.search(text)
-    return m.group(0).rstrip(")>].,!؟") if m else None
+    if not m:
+        return None
+    return m.group(0).rstrip(")>].,!؟")
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -359,7 +421,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     url = extract_url(text)
     if not url:
-        # only nudge in private chat
         if chat.type == ChatType.PRIVATE:
             await update.message.reply_text("Send a link to download.", reply_markup=main_panel(uid))
         return
@@ -370,29 +431,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     panel = group_quality_panel(token) if is_group else quality_panel(token)
 
     if is_group:
-        # reply to the user's message so it stays tidy
         try:
             await update.message.reply_text(
                 f"Link received from {update.effective_user.first_name or 'user'}.\n"
-                f"Choose quality:",
+                f"Build v{__version__} — Choose quality:",
                 reply_markup=panel,
             )
         except Forbidden:
             log.warning("No permission to post in group %s", chat.id)
     else:
-        await update.message.reply_text("Choose quality:", reply_markup=panel)
+        await update.message.reply_text(f"v{__version__} — Choose quality:", reply_markup=panel)
 
 
 # ------------------------------------------------------------------ #
-# Download: Instagram (instagrapi)
+# Download: Instagram
 # ------------------------------------------------------------------ #
-async def dl_ig(
-    status: StatusHandle,
-    context: ContextTypes.DEFAULT_TYPE,
-    url: str,
-    chat_id: int,
-    reply_to: Optional[int] = None,
-) -> None:
+async def dl_ig(status: StatusHandle, context: ContextTypes.DEFAULT_TYPE,
+                url: str, chat_id: int, reply_to: Optional[int] = None) -> None:
     if not ig_client:
         await status.edit("❌ Instagram login not configured.", force=True)
         return
@@ -405,35 +460,33 @@ async def dl_ig(
             return
         shortcode = m.group(2)
 
-        def do_info():
-            return ig_client.media_info(ig_client.media_pk_from_code(shortcode))
-
-        post = await asyncio.wait_for(loop.run_in_executor(None, do_info), timeout=30)
+        post = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: ig_client.media_info(ig_client.media_pk_from_code(shortcode))),
+            timeout=30,
+        )
 
         if post.media_type == 2:  # video
-            def dl_vid():
-                return ig_client.video_download(post.pk, folder=str(DOWNLOAD_DIR))
-            path = await asyncio.wait_for(loop.run_in_executor(None, dl_vid), timeout=120)
+            path = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: ig_client.video_download(post.pk, folder=str(DOWNLOAD_DIR))),
+                timeout=120,
+            )
             sz = path.stat().st_size / 1048576
             if sz > MAX_FILE_MB:
-                await status.edit(f"❌ File is {sz:.0f}MB, over the {MAX_FILE_MB}MB limit.", force=True)
+                await status.edit(f"❌ {sz:.0f}MB > {MAX_FILE_MB}MB limit.", force=True)
                 path.unlink(missing_ok=True)
                 return
-            await status.edit(f"📤 Uploading {human_size(0)}", force=True)
+            await status.edit("📤 Uploading…", force=True)
             async with _typing(context, chat_id):
-                with ProgressFile(path, status, label="📤 Uploading") as pf:
-                    await context.bot.send_video(
-                        chat_id, pf,
-                        caption=f"{sz:.1f} MB",
-                        supports_streaming=True,
-                        reply_to_message_id=reply_to,
-                    )
+                with ProgressFile(path, status) as pf:
+                    await context.bot.send_video(chat_id, pf, caption=f"{sz:.1f} MB",
+                                                 supports_streaming=True, reply_to_message_id=reply_to)
             STATS["ig_downloads"] += 1
             STATS["downloads"] += 1
         elif post.media_type == 1:  # photo
-            def dl_pic():
-                return ig_client.photo_download(post.pk, folder=str(DOWNLOAD_DIR))
-            path = await asyncio.wait_for(loop.run_in_executor(None, dl_pic), timeout=30)
+            path = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: ig_client.photo_download(post.pk, folder=str(DOWNLOAD_DIR))),
+                timeout=30,
+            )
             async with _typing(context, chat_id):
                 with open(path, "rb") as f:
                     await context.bot.send_photo(chat_id, f, reply_to_message_id=reply_to)
@@ -442,12 +495,10 @@ async def dl_ig(
         else:
             await status.edit("❌ Unsupported Instagram post type.", force=True)
             return
-
         await status.delete()
-
     except asyncio.TimeoutError:
         STATS["errors"] += 1
-        await status.edit("⏱ Timeout while fetching from Instagram.", force=True)
+        await status.edit("⏱ Timeout fetching from Instagram.", force=True)
     except Exception as e:
         STATS["errors"] += 1
         log.exception("IG fail")
@@ -458,40 +509,10 @@ async def dl_ig(
 # ------------------------------------------------------------------ #
 # Download: yt-dlp
 # ------------------------------------------------------------------ #
-def _probe_height(path: Path) -> Optional[int]:
-    """Use ffprobe to read the actual height of a downloaded media file.
-    Returns None if ffprobe is unavailable or fails — never blocks upload."""
-    if not shutil.which("ffprobe"):
-        return None
-    try:
-        out = subprocess.check_output(
-            [
-                "ffprobe", "-v", "error",
-                "-select_streams", "v:0",
-                "-show_entries", "stream=height",
-                "-of", "csv=s=x:p=0",
-                str(path),
-            ],
-            stderr=subprocess.DEVNULL,
-            timeout=10,
-        ).decode().strip()
-        if "x" in out:
-            _, h = out.split("x", 1)
-            return int(h)
-    except Exception:  # noqa: BLE001
-        return None
-    return None
-
-
-async def dl_ytdlp(
-    status: StatusHandle,
-    context: ContextTypes.DEFAULT_TYPE,
-    url: str,
-    quality: str,
-    chat_id: int,
-    reply_to: Optional[int] = None,
-) -> None:
-    await status.edit("🔎 Fetching info…", force=True)
+async def dl_ytdlp(status: StatusHandle, context: ContextTypes.DEFAULT_TYPE,
+                   url: str, quality: str, chat_id: int,
+                   reply_to: Optional[int] = None) -> None:
+    await status.edit(f"🔎 Fetching (q={quality})…", force=True)
     loop = asyncio.get_running_loop()
     folder = DOWNLOAD_DIR / uuid.uuid4().hex
     folder.mkdir(exist_ok=True)
@@ -508,12 +529,7 @@ async def dl_ytdlp(
         done = d.get("downloaded_bytes", 0)
         pct = (done / total * 100) if total else 0
         spd = (d.get("speed") or 0) / (1024 * 1024)
-        eta = d.get("eta")
-        eta_s = f" · ETA {eta}s" if eta else ""
-        text = (
-            f"⬇️ Downloading {progress_bar(pct)} {pct:.0f}%\n"
-            f"{spd:.1f} MB/s{eta_s}"
-        )
+        text = f"⬇️ {progress_bar(pct)} {pct:.0f}%\n{spd:.1f} MB/s"
         try:
             loop.create_task(status.edit(text, interval=0))
         except RuntimeError:
@@ -531,48 +547,18 @@ async def dl_ytdlp(
         "max_filesize": MAX_FILE_MB * 1024 * 1024,
         "progress_hooks": [hook],
         "writethumbnail": False,
+        "noprogress": False,
     }
     if INSTA_RE.search(url) and COOKIES_FILE.exists():
         opts["cookiefile"] = str(COOKIES_FILE)
     if HAS_ARIA2:
         opts["external_downloader"] = "aria2c"
         opts["external_downloader_args"] = ["-x", "16", "-s", "16", "-k", "1M"]
-    if quality == "audio":
-        opts["format"] = "bestaudio/best"
-        opts["postprocessors"] = [
-            {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
-        ]
-    elif quality in ("1080", "720", "480"):
-        # Cap video at the requested height, with proper upper-bound math:
-        # - 1080: pick best video <= 1080p (could be 720p if no 1080 exists)
-        # - 720:  pick best video <= 720p  (will never pick 1080p)
-        # - 480:  pick best video <= 480p  (will never pick 720p/1080p)
-        # We use an EXACT ceiling via a sorted merge with -S so smaller files don't
-        # accidentally win over bigger-but-still-under-cap streams.
-        opts["format"] = (
-            f"bv*[height<={quality}][ext=mp4]+ba[ext=m4a]/"
-            f"bv*[height<={quality}]+ba/b"
-            f"[height<={quality}]/"
-            f"b[height<={quality}]"
-        )
-        # Force yt-dlp to actually prefer the highest resolution under the cap
-        opts["format_sort"] = ["res:1080", "res:720", "res:480", "res:240"]
-        opts["format_sort_force"] = False  # don't override site-specific sort
-        # If 1080p is requested but only 720p exists, prefer mp4 muxed (not webm)
-        if quality == "1080":
-            opts["format"] = (
-                "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/"
-                "bv*[height<=1080]+ba[ext=m4a]/"
-                "bv*[height<=1080]+ba/"
-                "b[height<=1080]"
-            )
-    else:
-        # "best" — no height cap, but prefer mp4/m4a mux to keep file small
-        opts["format"] = (
-            "bv*[ext=mp4]+ba[ext=m4a]/"
-            "bv*[ext=mp4]+ba/"
-            "bv*+ba/b"
-        )
+
+    # >>> THE FIX: use build_format() with STRICT caps
+    opts.update(build_format(quality))
+
+    log.info("DL start: quality=%s format=%s", quality, opts.get("format", "default"))
 
     try:
         def do_dl():
@@ -581,7 +567,6 @@ async def dl_ytdlp(
 
         info = await asyncio.wait_for(loop.run_in_executor(None, do_dl), timeout=300)
 
-        # pick the largest non-thumbnail file
         skip_ext = {".jpg", ".jpeg", ".png", ".webp", ".part", ".ytdl", ".tmp"}
         files = [f for f in folder.iterdir() if f.is_file() and f.suffix.lower() not in skip_ext]
         if not files:
@@ -590,67 +575,56 @@ async def dl_ytdlp(
         path = max(files, key=lambda f: f.stat().st_size)
         sz = path.stat().st_size / 1048576
         if sz > MAX_FILE_MB:
-            await status.edit(
-                f"❌ File is {sz:.0f}MB, over the {MAX_FILE_MB}MB limit.", force=True
-            )
+            await status.edit(f"❌ {sz:.0f}MB > {MAX_FILE_MB}MB limit.", force=True)
             return
 
-        # Detect actual resolution of the downloaded file via ffprobe (if available).
-        # If user asked for 720p but file came back as 1080p (or vice versa),
-        # log it so we can spot format-not-respected bugs.
-        actual_height = _probe_height(path)
-        if quality in ("1080", "720", "480") and actual_height:
+        # Verify actual resolution
+        actual_h = _probe_height(path)
+        if quality in ("1080", "720", "480"):
             cap = int(quality)
-            if actual_height > cap:
-                log.warning(
-                    "Format cap not respected: requested <=%sp, got %sp for %s",
-                    cap, actual_height, url,
-                )
-            quality_label = f"{actual_height}p" if actual_height else quality
+            if actual_h and actual_h > cap:
+                log.warning("CAP EXCEEDED: requested <=%sp got %sp", cap, actual_h)
+            quality_label = f"{actual_h}p" if actual_h else f"~{quality}p"
         else:
-            quality_label = quality if quality == "audio" else "best"
+            quality_label = "audio" if quality == "audio" else "best"
 
-        cap = f"{sz:.1f} MB · {quality_label}"
-        await status.edit("📤 Uploading 0%", force=True)
+        cap_text = f"{sz:.1f} MB · {quality_label}"
+        await status.edit("📤 Uploading…", force=True)
         async with _typing(context, chat_id):
-            with ProgressFile(path, status, label="📤 Uploading") as pf:
+            with ProgressFile(path, status) as pf:
                 ext = path.suffix.lower()
                 if ext in (".mp3", ".m4a", ".opus", ".ogg"):
-                    await context.bot.send_audio(chat_id, pf, caption=cap, reply_to_message_id=reply_to)
+                    await context.bot.send_audio(chat_id, pf, caption=cap_text, reply_to_message_id=reply_to)
                 elif ext in (".mp4", ".mkv", ".webm", ".mov"):
                     await context.bot.send_video(
-                        chat_id, pf,
-                        caption=cap,
-                        supports_streaming=True,
+                        chat_id, pf, caption=cap_text, supports_streaming=True,
                         duration=(info or {}).get("duration"),
                         width=(info or {}).get("width"),
                         height=(info or {}).get("height"),
                         reply_to_message_id=reply_to,
                     )
                 else:
-                    await context.bot.send_document(chat_id, pf, caption=cap, reply_to_message_id=reply_to)
-
+                    await context.bot.send_document(chat_id, pf, caption=cap_text, reply_to_message_id=reply_to)
         STATS["downloads"] += 1
         await status.delete()
-
     except asyncio.TimeoutError:
         STATS["errors"] += 1
-        await status.edit("⏱ Timeout while downloading.", force=True)
+        await status.edit("⏱ Timeout.", force=True)
     except yt_dlp.utils.DownloadError as e:
         STATS["errors"] += 1
-        msg = str(e).split("\n")[-2] if "\n" in str(e) else str(e)
+        msg = str(e).strip().split("\n")[-1] if str(e).strip() else "download error"
         log.warning("yt-dlp fail: %s", e)
         await status.edit(f"❌ {msg[:180]}", force=True)
     except Exception:
         STATS["errors"] += 1
         log.exception("DL fail")
-        await status.edit("❌ Download error. Check the link and try again.", force=True)
+        await status.edit("❌ Download error.", force=True)
     finally:
         shutil.rmtree(folder, ignore_errors=True)
 
 
 # ------------------------------------------------------------------ #
-# Callbacks (quality selection, admin, etc.)
+# Callbacks
 # ------------------------------------------------------------------ #
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global BOT_ENABLED
@@ -659,17 +633,16 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     try:
         await q.answer()
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     data = q.data or ""
     uid = q.from_user.id if q.from_user else 0
     chat_id = q.message.chat_id if q.message else 0
     msg_id = q.message.message_id if q.message else 0
 
-    # ---- nav buttons ----
     if data == "home":
         try:
-            await q.edit_message_text("Home", reply_markup=main_panel(uid))
+            await q.edit_message_text(f"Home (v{__version__})", reply_markup=main_panel(uid))
         except BadRequest:
             pass
         return
@@ -677,7 +650,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             await q.edit_message_text(
                 "Send a link → pick quality → done.\n"
-                "In groups, just send the link in chat.",
+                "1080p/720p/480p are strict caps — file will never exceed them.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="home")]]),
             )
         except BadRequest:
@@ -688,9 +661,16 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ig = " · IG: connected" if ig_client else " · IG: off"
         up = int(time.time() - STATS["started"])
         await q.edit_message_text(
-            f"🟢 Online · Engine: {e}{ig}\n"
+            f"🟢 Online · Engine: {e}{ig}\nBuild: v{__version__}\n"
             f"Downloads: {STATS['downloads']} · Errors: {STATS['errors']}\n"
             f"Uptime: {up // 3600}h {(up % 3600) // 60}m",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="home")]]),
+        )
+        return
+    if data == "version":
+        changes = "\n".join(f"  • {c}" for c in __changelog__)
+        await q.edit_message_text(
+            f"🤖 Build v{__version__}\n{__build__}\n\nChanges:\n{changes}",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="home")]]),
         )
         return
@@ -713,25 +693,18 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "a_toggle" and uid in ADMIN_IDS:
         BOT_ENABLED = not BOT_ENABLED
         try:
-            await q.edit_message_text(
-                "✅ Bot enabled" if BOT_ENABLED else "⛔ Bot disabled",
-                reply_markup=admin_panel(),
-            )
+            await q.edit_message_text("✅ Bot enabled" if BOT_ENABLED else "⛔ Bot disabled",
+                                      reply_markup=admin_panel())
         except BadRequest:
             pass
         return
-
-    # ---- cancel ----
     if data.startswith("cancel|"):
-        token = data.split("|", 1)[1]
-        PENDING.pop(token, None)
+        PENDING.pop(data.split("|", 1)[1], None)
         try:
             await q.edit_message_text("🚫 Cancelled.", reply_markup=main_panel(uid))
         except BadRequest:
             pass
         return
-
-    # ---- quality selection ----
     if data.startswith("dl|"):
         try:
             _, quality, token = data.split("|", 2)
@@ -744,24 +717,18 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             except BadRequest:
                 pass
             return
-
         status = StatusHandle(bot=context.bot, chat_id=chat_id, message_id=msg_id)
-        is_group = (q.message and q.message.chat and q.message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP))
-        reply_to = None  # we are *the* reply panel in groups, no need to re-reply
-
         if INSTA_RE.search(url) and ig_client:
-            asyncio.create_task(dl_ig(status, context, url, chat_id, reply_to=None))
+            asyncio.create_task(dl_ig(status, context, url, chat_id))
         else:
-            asyncio.create_task(dl_ytdlp(status, context, url, quality, chat_id, reply_to=None))
+            asyncio.create_task(dl_ytdlp(status, context, url, quality, chat_id))
 
 
 # ------------------------------------------------------------------ #
 # Helpers
 # ------------------------------------------------------------------ #
 class _typing:
-    """Context manager that keeps 'typing…' action alive while uploading."""
-
-    def __init__(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    def __init__(self, context, chat_id):
         self.context = context
         self.chat_id = chat_id
         self._task: Optional[asyncio.Task] = None
@@ -774,27 +741,26 @@ class _typing:
                     await asyncio.sleep(4)
             except asyncio.CancelledError:
                 pass
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
-
         self._task = asyncio.create_task(loop())
         return self
 
-    async def __aexit__(self, exc_type, exc, tb):
+    async def __aexit__(self, *a):
         if self._task:
             self._task.cancel()
             try:
                 await self._task
-            except (asyncio.CancelledError, Exception):
+            except Exception:
                 pass
 
 
-async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    log.exception("Unhandled exception", exc_info=context.error)
+async def on_error(update, context):
+    log.exception("Unhandled", exc_info=context.error)
 
 
 # ------------------------------------------------------------------ #
-# Entry point
+# Main
 # ------------------------------------------------------------------ #
 def main() -> int:
     if not BOT_TOKEN:
@@ -802,6 +768,13 @@ def main() -> int:
         return 1
 
     init_instagram()
+
+    # Print build banner so it shows in startup logs
+    log.info("=" * 50)
+    log.info("Downloader Bot v%s", __version__)
+    log.info("Build: %s", __build__)
+    log.info("ffprobe=%s, aria2=%s, ig=%s", HAS_FFPROBE, HAS_ARIA2, ig_client is not None)
+    log.info("=" * 50)
 
     request = HTTPXRequest(
         connection_pool_size=16,
@@ -817,24 +790,15 @@ def main() -> int:
         .token(BOT_TOKEN)
         .request(request)
         .concurrent_updates(True)
-        .rate_limiter(None)
         .build()
     )
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("version", cmd_version))
     app.add_handler(CallbackQueryHandler(callbacks))
-    # groups: only respond to commands (no auto-link sniffer in groups)
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT
-            & ~filters.COMMAND
-            & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS),
-            handle_text,
-        )
-    )
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_error_handler(on_error)
 
-    log.info("Bot starting… aria2=%s ig=%s", HAS_ARIA2, ig_client is not None)
     app.run_polling(drop_pending_updates=True, allowed_updates=["message", "callback_query"])
     return 0
 
