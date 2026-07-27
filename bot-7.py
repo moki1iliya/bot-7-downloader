@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 import uuid
@@ -457,6 +458,31 @@ async def dl_ig(
 # ------------------------------------------------------------------ #
 # Download: yt-dlp
 # ------------------------------------------------------------------ #
+def _probe_height(path: Path) -> Optional[int]:
+    """Use ffprobe to read the actual height of a downloaded media file.
+    Returns None if ffprobe is unavailable or fails — never blocks upload."""
+    if not shutil.which("ffprobe"):
+        return None
+    try:
+        out = subprocess.check_output(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=height",
+                "-of", "csv=s=x:p=0",
+                str(path),
+            ],
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        ).decode().strip()
+        if "x" in out:
+            _, h = out.split("x", 1)
+            return int(h)
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 async def dl_ytdlp(
     status: StatusHandle,
     context: ContextTypes.DEFAULT_TYPE,
@@ -517,9 +543,36 @@ async def dl_ytdlp(
             {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
         ]
     elif quality in ("1080", "720", "480"):
-        opts["format"] = f"bv*[height<={quality}][ext=mp4]+ba[ext=m4a]/bv*[height<={quality}]+ba/b[height<={quality}]/best"
+        # Cap video at the requested height, with proper upper-bound math:
+        # - 1080: pick best video <= 1080p (could be 720p if no 1080 exists)
+        # - 720:  pick best video <= 720p  (will never pick 1080p)
+        # - 480:  pick best video <= 480p  (will never pick 720p/1080p)
+        # We use an EXACT ceiling via a sorted merge with -S so smaller files don't
+        # accidentally win over bigger-but-still-under-cap streams.
+        opts["format"] = (
+            f"bv*[height<={quality}][ext=mp4]+ba[ext=m4a]/"
+            f"bv*[height<={quality}]+ba/b"
+            f"[height<={quality}]/"
+            f"b[height<={quality}]"
+        )
+        # Force yt-dlp to actually prefer the highest resolution under the cap
+        opts["format_sort"] = ["res:1080", "res:720", "res:480", "res:240"]
+        opts["format_sort_force"] = False  # don't override site-specific sort
+        # If 1080p is requested but only 720p exists, prefer mp4 muxed (not webm)
+        if quality == "1080":
+            opts["format"] = (
+                "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/"
+                "bv*[height<=1080]+ba[ext=m4a]/"
+                "bv*[height<=1080]+ba/"
+                "b[height<=1080]"
+            )
     else:
-        opts["format"] = "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b"
+        # "best" — no height cap, but prefer mp4/m4a mux to keep file small
+        opts["format"] = (
+            "bv*[ext=mp4]+ba[ext=m4a]/"
+            "bv*[ext=mp4]+ba/"
+            "bv*+ba/b"
+        )
 
     try:
         def do_dl():
@@ -542,7 +595,22 @@ async def dl_ytdlp(
             )
             return
 
-        cap = f"{sz:.1f} MB"
+        # Detect actual resolution of the downloaded file via ffprobe (if available).
+        # If user asked for 720p but file came back as 1080p (or vice versa),
+        # log it so we can spot format-not-respected bugs.
+        actual_height = _probe_height(path)
+        if quality in ("1080", "720", "480") and actual_height:
+            cap = int(quality)
+            if actual_height > cap:
+                log.warning(
+                    "Format cap not respected: requested <=%sp, got %sp for %s",
+                    cap, actual_height, url,
+                )
+            quality_label = f"{actual_height}p" if actual_height else quality
+        else:
+            quality_label = quality if quality == "audio" else "best"
+
+        cap = f"{sz:.1f} MB · {quality_label}"
         await status.edit("📤 Uploading 0%", force=True)
         async with _typing(context, chat_id):
             with ProgressFile(path, status, label="📤 Uploading") as pf:
