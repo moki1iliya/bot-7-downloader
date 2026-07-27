@@ -246,8 +246,11 @@ async def dl_ytdlp(status, context, url, quality, chat_id, delete_msg_id=None):
     try:
         await se(status, "Fetching...")
         def do_dl():
+            log.info("Starting download: %s", url)
             with yt_dlp.YoutubeDL(opts) as ydl:
-                return ydl.extract_info(url, download=True)
+                result = ydl.extract_info(url, download=True)
+            log.info("Download complete: %s", url)
+            return result
         info = await asyncio.wait_for(loop.run_in_executor(None, do_dl), timeout=120)
         files = [f for f in folder.iterdir() if f.suffix.lower() in (".mp4",".mkv",".webm",".mp3",".m4a",".opus",".ogg")]
         if not files:
@@ -259,14 +262,14 @@ async def dl_ytdlp(status, context, url, quality, chat_id, delete_msg_id=None):
         if sz > MAX_FILE_MB:
             await se(status, f"File is {sz:.0f}MB, over the {MAX_FILE_MB}MB limit."); return
         cap = f"{sz:.1f} MB"
-        await se(status, "Uploading 0%")
-        with ProgressFile(path, status, context, loop, label="Uploading") as pf:
+        await se(status, "Uploading...")
+        with open(path, "rb") as f:
             if path.suffix in (".mp3",".m4a",".opus",".ogg"):
-                await context.bot.send_audio(chat_id, pf, caption=cap)
+                await context.bot.send_audio(chat_id, f, caption=cap)
             elif path.suffix in (".mp4",".mkv",".webm"):
-                await context.bot.send_video(chat_id, pf, caption=cap, supports_streaming=True, duration=info.get("duration"), width=info.get("width"), height=info.get("height"))
+                await context.bot.send_video(chat_id, f, caption=cap, supports_streaming=True, duration=info.get("duration"), width=info.get("width"), height=info.get("height"))
             else:
-                await context.bot.send_document(chat_id, pf, caption=cap)
+                await context.bot.send_document(chat_id, f, caption=cap)
         STATS["downloads"] += 1
         if delete_msg_id:
             try: await context.bot.delete_message(chat_id=chat_id, message_id=delete_msg_id)
