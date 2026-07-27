@@ -80,10 +80,7 @@ async def handle_text(update, context):
         url = m.group(0)
         chat_id = update.effective_chat.id
         status = await context.bot.send_message(chat_id, "⏬ ...")
-        if INSTA_RE.search(url) and ig_client:
-            asyncio.create_task(dl_ig(status, context, url, chat_id, update.message.message_id))
-        else:
-            asyncio.create_task(dl_ytdlp(status, context, url, "best", chat_id, update.message.message_id))
+        asyncio.create_task(dl_ytdlp(status, context, url, "best", chat_id, update.message.message_id))
         return
 
     m = URL_RE.search(text)
@@ -91,13 +88,9 @@ async def handle_text(update, context):
         await update.message.reply_text("❗ لینک بفرست.", reply_markup=main_panel(uid))
         return
     url = m.group(0)
-    if INSTA_RE.search(url) and ig_client:
-        status = await update.message.reply_text("⏬ اینستاگرام...")
-        asyncio.create_task(dl_ig(status, context, url, update.effective_chat.id))
-    else:
-        token = uuid.uuid4().hex[:10]
-        PENDING[token] = url
-        await update.message.reply_text("🎯 کیفیت:", reply_markup=quality_panel(token))
+    token = uuid.uuid4().hex[:10]
+    PENDING[token] = url
+    await update.message.reply_text("🎯 کیفیت:", reply_markup=quality_panel(token))
 
 async def dl_ig(status, context, url, chat_id, delete_msg_id=None):
     """Download Instagram via instagrapi"""
@@ -242,10 +235,7 @@ async def callbacks(update, context):
         _, quality, token = data.split("|"); url = PENDING.pop(token, None)
         if not url: await q.edit_message_text("⏰"); return
         sh = StatusHandle(context.bot, q.message.chat_id, q.message.message_id)
-        if INSTA_RE.search(url) and ig_client:
-            asyncio.create_task(dl_ig(sh, context, url, q.message.chat_id))
-        else:
-            asyncio.create_task(dl_ytdlp(sh, context, url, quality, q.message.chat_id))
+        asyncio.create_task(dl_ytdlp(sh, context, url, quality, q.message.chat_id))
 
 class StatusHandle:
     def __init__(self, bot, cid, mid): self.bot=bot; self.cid=cid; self.mid=mid
