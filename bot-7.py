@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""ربات دانلودر PRO — yt-dlp خالص"""
+"""ربات دانلودر PRO — yt-dlp + instagrapi"""
 import asyncio, json, logging, os, re, shutil, time, uuid
 from pathlib import Path
 import yt_dlp
@@ -8,18 +8,39 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
+# instagrapi - optional, fail gracefully
+try:
+    from instagrapi import Client as InstaClient
+    HAS_INSTA = True
+except ImportError:
+    HAS_INSTA = False
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 ADMIN_IDS = {7438138322}
 DOWNLOAD_DIR = Path("downloads"); DOWNLOAD_DIR.mkdir(exist_ok=True)
 MAX_FILE_MB = 49
 HAS_ARIA2 = shutil.which("aria2c") is not None
+IG_USERNAME = os.environ.get("INSTAGRAM_USERNAME", "")
+IG_PASSWORD = os.environ.get("INSTAGRAM_PASSWORD", "")
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 log = logging.getLogger("bot")
 URL_RE = re.compile(r"https?://\S+")
+INSTA_RE = re.compile(r"https?://(www\.)?(instagram\.com|instagr\.am)/\S+", re.I)
 STATS = {"users": set(), "downloads": 0, "errors": 0, "started": time.time()}
 PENDING = {}
 BOT_ENABLED = True
+
+# Instagram client
+ig_client = None
+if HAS_INSTA and IG_USERNAME and IG_PASSWORD:
+    try:
+        ig_client = InstaClient()
+        ig_client.login(IG_USERNAME, IG_PASSWORD)
+        log.info("Instagram login OK ✅")
+    except Exception as e:
+        log.error("Instagram login FAILED: %s", e)
+        ig_client = None
 
 def main_panel(uid):
     rows = [[InlineKeyboardButton("📥 راهنما", callback_data="help"), InlineKeyboardButton("📊 وضعیت", callback_data="status")]]
@@ -42,7 +63,8 @@ def progress_bar(pct):
 async def start(update, context):
     STATS["users"].add(update.effective_user.id)
     e = "aria2c 🚀" if HAS_ARIA2 else "yt-dlp ⚡"
-    await update.message.reply_text(f"سلام {update.effective_user.first_name} 👋\n\n🔥 <b>دانلودر PRO</b> | {e}\nلینک بفرست!", parse_mode=ParseMode.HTML, reply_markup=main_panel(update.effective_user.id))
+    ig = " | IG ✅" if ig_client else ""
+    await update.message.reply_text(f"سلام {update.effective_user.first_name} 👋\n\n🔥 <b>دانلودر PRO</b> | {e}{ig}\nلینک بفرست!", parse_mode=ParseMode.HTML, reply_markup=main_panel(update.effective_user.id))
 
 async def handle_text(update, context):
     uid = update.effective_user.id
@@ -57,18 +79,78 @@ async def handle_text(update, context):
         url = m.group(0)
         chat_id = update.effective_chat.id
         status = await context.bot.send_message(chat_id, "⏬ ...")
-        asyncio.create_task(dl(status, context, url, "best", chat_id, update.message.message_id))
+        if INSTA_RE.search(url) and ig_client:
+            asyncio.create_task(dl_ig(status, context, url, chat_id, update.message.message_id))
+        else:
+            asyncio.create_task(dl_ytdlp(status, context, url, "best", chat_id, update.message.message_id))
         return
 
     m = URL_RE.search(text)
     if not m:
         await update.message.reply_text("❗ لینک بفرست.", reply_markup=main_panel(uid))
         return
-    token = uuid.uuid4().hex[:10]
-    PENDING[token] = m.group(0)
-    await update.message.reply_text("🎯 کیفیت:", reply_markup=quality_panel(token))
+    url = m.group(0)
+    if INSTA_RE.search(url) and ig_client:
+        status = await update.message.reply_text("⏬ اینستاگرام...")
+        asyncio.create_task(dl_ig(status, context, url, update.effective_chat.id))
+    else:
+        token = uuid.uuid4().hex[:10]
+        PENDING[token] = url
+        await update.message.reply_text("🎯 کیفیت:", reply_markup=quality_panel(token))
 
-async def dl(status, context, url, quality, chat_id, delete_msg_id=None):
+async def dl_ig(status, context, url, chat_id, delete_msg_id=None):
+    """Download Instagram via instagrapi"""
+    if not ig_client:
+        await se(status, "❌ Instagram login نیست")
+        return
+    loop = asyncio.get_running_loop()
+    try:
+        m = re.search(r"/(p|reel|tv)/([A-Za-z0-9_-]+)", url)
+        if not m:
+            await se(status, "❌ لینک نامعتبر"); return
+        shortcode = m.group(2)
+
+        def do_dl():
+            post = ig_client.media_info(ig_client.media_pk_from_code(shortcode))
+            return post
+
+        post = await asyncio.wait_for(loop.run_in_executor(None, do_dl), timeout=30)
+
+        if post.media_type == 2:  # video
+            def dl_vid():
+                path = ig_client.video_download(post.pk, folder=str(DOWNLOAD_DIR))
+                return path
+            path = await asyncio.wait_for(loop.run_in_executor(None, dl_vid), timeout=60)
+            sz = path.stat().st_size / 1048576
+            with open(path, "rb") as f:
+                await context.bot.send_video(chat_id, f, caption=f"📦 {sz:.1f}MB", supports_streaming=True)
+            STATS["downloads"] += 1
+        elif post.media_type == 1:  # photo
+            def dl_pic():
+                path = ig_client.photo_download(post.pk, folder=str(DOWNLOAD_DIR))
+                return path
+            path = await asyncio.wait_for(loop.run_in_executor(None, dl_pic), timeout=30)
+            with open(path, "rb") as f:
+                await context.bot.send_photo(chat_id, f)
+            STATS["downloads"] += 1
+        else:
+            await se(status, "❌ نوع پست پشتیبانی نمیشه"); return
+
+        if delete_msg_id:
+            try: await context.bot.delete_message(chat_id=chat_id, message_id=delete_msg_id)
+            except: pass
+        await status.delete()
+
+    except asyncio.TimeoutError:
+        STATS["errors"] += 1
+        await se(status, "❌ timeout")
+    except Exception as e:
+        STATS["errors"] += 1
+        log.error("IG fail: %s", e)
+        # Fallback to yt-dlp
+        await dl_ytdlp(status, context, url, "best", chat_id, delete_msg_id)
+
+async def dl_ytdlp(status, context, url, quality, chat_id, delete_msg_id=None):
     loop = asyncio.get_running_loop()
     folder = DOWNLOAD_DIR / uuid.uuid4().hex
     folder.mkdir(exist_ok=True)
@@ -112,7 +194,7 @@ async def dl(status, context, url, quality, chat_id, delete_msg_id=None):
         if sz > MAX_FILE_MB:
             await se(status, f"❌ حجم {sz:.0f}MB زیاده."); return
         cap = f"📦 {sz:.1f}MB"
-        await se(status, f"📤 آپلود ({sz:.1f}MB)...")
+        await se(status, f"📤 ({sz:.1f}MB)...")
         with open(path, "rb") as f:
             if path.suffix in (".mp3",".m4a",".opus",".ogg"):
                 await context.bot.send_audio(chat_id, f, caption=cap)
@@ -143,7 +225,8 @@ async def callbacks(update, context):
     elif data == "help": await q.edit_message_text("لینک بفرست! 🚀", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="home")]]))
     elif data == "status":
         e = "aria2c 🚀" if HAS_ARIA2 else "yt-dlp ⚡"
-        await q.edit_message_text(f"🟢 {e}\n📥 {STATS['downloads']}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="home")]]))
+        ig = " | IG ✅" if ig_client else " | IG ❌"
+        await q.edit_message_text(f"🟢 {e}{ig}\n📥 {STATS['downloads']}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="home")]]))
     elif data == "admin" and uid in ADMIN_IDS: await q.edit_message_text("👑", reply_markup=admin_panel())
     elif data == "a_stats" and uid in ADMIN_IDS:
         up = int(time.time()-STATS["started"])
@@ -156,7 +239,10 @@ async def callbacks(update, context):
         _, quality, token = data.split("|"); url = PENDING.pop(token, None)
         if not url: await q.edit_message_text("⏰"); return
         sh = StatusHandle(context.bot, q.message.chat_id, q.message.message_id)
-        asyncio.create_task(dl(sh, context, url, quality, q.message.chat_id))
+        if INSTA_RE.search(url) and ig_client:
+            asyncio.create_task(dl_ig(sh, context, url, q.message.chat_id))
+        else:
+            asyncio.create_task(dl_ytdlp(sh, context, url, quality, q.message.chat_id))
 
 class StatusHandle:
     def __init__(self, bot, cid, mid): self.bot=bot; self.cid=cid; self.mid=mid
@@ -176,6 +262,6 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(callbacks))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    log.info("Bot running... aria2=%s", HAS_ARIA2)
+    log.info("Bot running... aria2=%s ig=%s", HAS_ARIA2, ig_client is not None)
     app.run_polling(drop_pending_updates=True)
 if __name__ == "__main__": main()
