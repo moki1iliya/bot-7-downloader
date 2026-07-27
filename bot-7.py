@@ -117,7 +117,7 @@ def init_instagram() -> None:
 # UI
 # ------------------------------------------------------------------ #
 def main_panel(uid: int) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton("Hososhsvslp", callback_data="help"),
+    rows = [[InlineKeyboardButton("Help", callback_data="help"),
              InlineKeyboardButton("Status", callback_data="status")]]
     if uid in ADMIN_IDS:
         rows.append([InlineKeyboardButton("Admin", callback_data="admin")])
@@ -175,8 +175,12 @@ def build_format(quality: str) -> dict:
     """
     Returns yt-dlp options for the requested quality.
 
-    KEY FIX: We split caps so 1080p NEVER falls through to 2160p,
-    and 480p NEVER falls through to 720p.
+    KEY FIX v2: Format chains now handle BOTH cases:
+    1. Sites with separate video+audio streams (YouTube) — use bv*+ba
+    2. Sites with muxed streams (Twitter/IG/TikTok) — use b[height<=X]
+
+    yt-dlp tries each format spec in order and picks the first that matches,
+    so the chain must end with a permissive fallback.
     """
     if quality == "audio":
         return {
@@ -187,54 +191,87 @@ def build_format(quality: str) -> dict:
         }
 
     if quality == "best":
-        # No cap, but prefer mp4 mux to keep file size sane
+        # No cap — prefer mp4 mux to keep file size sane
         return {
-            "format": "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/bv*[ext=mp4]+ba/bv*+ba/b",
+            "format": (
+                "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/"
+                "bv*[ext=mp4]+ba[ext=m4a]/"
+                "bv*[ext=mp4]+ba/"
+                "bv*+ba/b"
+            ),
         }
 
-    # Map button -> strict ceiling. We do NOT use <= because yt-dlp
-    # picks the largest matching stream which can be way above the
-    # requested cap when the source only has one or two streams.
-    cap_map = {
-        "1080": 1080,
-        "720": 720,
-        "480": 480,
-    }
+    cap_map = {"1080": 1080, "720": 720, "480": 480}
     cap = cap_map.get(quality)
     if cap is None:
-        return {"format": "bv*[ext=mp4]+ba/b"}
+        return {"format": "bv*+ba/b"}
 
-    # Strict cap: prefer exact height, then anything <= cap, then mp4-only
-    # The order matters — yt-dlp picks the FIRST match in the chain.
+    # Build a robust chain that works for YouTube (separate streams)
+    # AND for Twitter/IG/TikTok (muxed streams).
+    # The KEY: every "bv*+ba" variant is paired with a "b[height<=X]"
+    # muxed fallback so we never get "no video format found".
     if cap == 1080:
         fmt = (
+            # 1) Exact 1080p with mp4 video + m4a audio (YouTube)
             "bv*[height=1080][ext=mp4]+ba[ext=m4a]/"
             "bv*[height=1080]+ba[ext=m4a]/"
+            # 2) Exact 1080p any container
+            "bv*[height=1080][ext=mp4]+ba/"
+            "bv*[height=1080]+ba/"
+            "bv*[height=1080]/"
+            # 3) Under-cap with mp4 audio
             "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/"
+            "bv*[height<=1080]+ba[ext=m4a]/"
+            # 4) Under-cap any container
+            "bv*[height<=1080][ext=mp4]+ba/"
             "bv*[height<=1080]+ba/"
-            "bv*[height<=1080]"
+            # 5) Muxed fallback (Twitter/IG/TikTok) — single stream w/ audio inside
+            "b[height=1080][ext=mp4]/"
+            "b[height=1080]/"
+            "b[height<=1080][ext=mp4]/"
+            "b[height<=1080]/"
+            # 6) Last resort — anything (still capped at file size)
+            "b"
         )
     elif cap == 720:
         fmt = (
             "bv*[height=720][ext=mp4]+ba[ext=m4a]/"
             "bv*[height=720]+ba[ext=m4a]/"
+            "bv*[height=720][ext=mp4]+ba/"
+            "bv*[height=720]+ba/"
+            "bv*[height=720]/"
             "bv*[height<=720][ext=mp4]+ba[ext=m4a]/"
+            "bv*[height<=720]+ba[ext=m4a]/"
+            "bv*[height<=720][ext=mp4]+ba/"
             "bv*[height<=720]+ba/"
-            "bv*[height<=720]"
+            "b[height=720][ext=mp4]/"
+            "b[height=720]/"
+            "b[height<=720][ext=mp4]/"
+            "b[height<=720]/"
+            "b"
         )
     else:  # 480
         fmt = (
             "bv*[height=480][ext=mp4]+ba[ext=m4a]/"
             "bv*[height=480]+ba[ext=m4a]/"
+            "bv*[height=480][ext=mp4]+ba/"
+            "bv*[height=480]+ba/"
+            "bv*[height=480]/"
             "bv*[height<=480][ext=mp4]+ba[ext=m4a]/"
+            "bv*[height<=480]+ba[ext=m4a]/"
+            "bv*[height<=480][ext=mp4]+ba/"
             "bv*[height<=480]+ba/"
-            "bv*[height<=480]"
+            "b[height=480][ext=mp4]/"
+            "b[height=480]/"
+            "b[height<=480][ext=mp4]/"
+            "b[height<=480]/"
+            "b"
         )
 
     return {
         "format": fmt,
-        # Force sort by resolution so the chain actually picks the cap
-        "format_sort": ["res", "ext:mp4:m4a", "size", "br"],
+        # Sort by resolution so the cap is respected, not by size
+        "format_sort": ["res", "ext:mp4:m4a", "br"],
     }
 
 
