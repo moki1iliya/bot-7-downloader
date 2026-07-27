@@ -36,7 +36,7 @@ if INSTA_USERNAME and INSTA_PASSWORD:
 
 def save_cache(): CACHE_FILE.write_text(json.dumps(CACHE, ensure_ascii=False))
 def main_panel(uid):
-    rows = [[InlineKeyboardButton("📥 راهنما", callback_data="help"), InlineKeyboardButton("🌐 سایت‌ها", callback_data="sites")], [InlineKeyboardButton("📊 وضعیت", callback_data="status")]]
+    rows = [[InlineKeyboardButton("📥 راهنما", callback_data="help"), InlineKeyboardButton("🌐 ست‌ها", callback_data="sites")], [InlineKeyboardButton("📊 وضعیت", callback_data="status")]]
     if uid in ADMIN_IDS: rows.append([InlineKeyboardButton("👑 مدیریت", callback_data="admin")])
     return InlineKeyboardMarkup(rows)
 def quality_panel(token):
