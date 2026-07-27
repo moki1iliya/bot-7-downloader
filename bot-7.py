@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""🔥 ربات دانلودر PRO v3 — Instagram via instaloader"""
+"""🔥 ربات دانلودر PRO 9191 — Instagram via instaloader"""
 import asyncio, json, logging, os, re, shutil, time, uuid
 from pathlib import Path
 import yt_dlp, instaloader
