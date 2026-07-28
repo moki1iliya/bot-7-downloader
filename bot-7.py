@@ -460,8 +460,12 @@ async def dl_ytdlp(
         "progress_hooks": [hook],
         "writethumbnail": False,
     }
-    if INSTA_RE.search(url) and COOKIES_FILE.exists():
-        opts["cookiefile"] = str(COOKIES_FILE)
+    if INSTA_RE.search(url):
+        if IG_USERNAME and IG_PASSWORD:
+            opts["username"] = IG_USERNAME
+            opts["password"] = IG_PASSWORD
+        elif COOKIES_FILE.exists():
+            opts["cookiefile"] = str(COOKIES_FILE)
     if HAS_ARIA2:
         opts["external_downloader"] = "aria2c"
         opts["external_downloader_args"] = ["-x", "16", "-s", "16", "-k", "1M"]
