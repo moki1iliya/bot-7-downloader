@@ -703,6 +703,7 @@ def main() -> int:
     app.add_error_handler(on_error)
 
     log.info("Bot starting… aria2=%s ig=%s", HAS_ARIA2, ig_client is not None)
+    log.info("IG_USERNAME=%s IG_PASSWORD=%s", bool(IG_USERNAME), bool(IG_PASSWORD))
     app.run_polling(drop_pending_updates=True, allowed_updates=["message", "callback_query"])
     return 0
 
