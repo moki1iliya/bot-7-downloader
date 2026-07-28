@@ -124,39 +124,7 @@ def main_panel(uid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def quality_panel(token: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("Best", callback_data=f"dl|best|{token}"),
-                InlineKeyboardButton("1080p", callback_data=f"dl|1080|{token}"),
-            ],
-            [
-                InlineKeyboardButton("720p", callback_data=f"dl|720|{token}"),
-                InlineKeyboardButton("480p", callback_data=f"dl|480|{token}"),
-            ],
-            [
-                InlineKeyboardButton("MP3", callback_data=f"dl|audio|{token}"),
-                InlineKeyboardButton("Cancel", callback_data=f"cancel|{token}"),
-            ],
-        ]
-    )
 
-
-def group_quality_panel(token: str) -> InlineKeyboardMarkup:
-    """Compact panel for group chats (no audio / no 1080 to keep it small)."""
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("Best", callback_data=f"dl|best|{token}"),
-                InlineKeyboardButton("720p", callback_data=f"dl|720|{token}"),
-            ],
-            [
-                InlineKeyboardButton("MP3", callback_data=f"dl|audio|{token}"),
-                InlineKeyboardButton("Cancel", callback_data=f"cancel|{token}"),
-            ],
-        ]
-    )
 
 
 def admin_panel() -> InlineKeyboardMarkup:
@@ -359,7 +327,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     url = extract_url(text)
     if not url:
-        # only nudge in private chat
         if chat.type == ChatType.PRIVATE:
             await update.message.reply_text("Send a link to download.", reply_markup=main_panel(uid))
         return
@@ -458,31 +425,6 @@ async def dl_ig(
 # ------------------------------------------------------------------ #
 # Download: yt-dlp
 # ------------------------------------------------------------------ #
-def _probe_height(path: Path) -> Optional[int]:
-    """Use ffprobe to read the actual height of a downloaded media file.
-    Returns None if ffprobe is unavailable or fails — never blocks upload."""
-    if not shutil.which("ffprobe"):
-        return None
-    try:
-        out = subprocess.check_output(
-            [
-                "ffprobe", "-v", "error",
-                "-select_streams", "v:0",
-                "-show_entries", "stream=height",
-                "-of", "csv=s=x:p=0",
-                str(path),
-            ],
-            stderr=subprocess.DEVNULL,
-            timeout=10,
-        ).decode().strip()
-        if "x" in out:
-            _, h = out.split("x", 1)
-            return int(h)
-    except Exception:  # noqa: BLE001
-        return None
-    return None
-
-
 async def dl_ytdlp(
     status: StatusHandle,
     context: ContextTypes.DEFAULT_TYPE,
@@ -598,19 +540,7 @@ async def dl_ytdlp(
         # Detect actual resolution of the downloaded file via ffprobe (if available).
         # If user asked for 720p but file came back as 1080p (or vice versa),
         # log it so we can spot format-not-respected bugs.
-        actual_height = _probe_height(path)
-        if quality in ("1080", "720", "480") and actual_height:
-            cap = int(quality)
-            if actual_height > cap:
-                log.warning(
-                    "Format cap not respected: requested <=%sp, got %sp for %s",
-                    cap, actual_height, url,
-                )
-            quality_label = f"{actual_height}p" if actual_height else quality
-        else:
-            quality_label = quality if quality == "audio" else "best"
-
-        cap = f"{sz:.1f} MB · {quality_label}"
+        cap = f"{sz:.1f} MB"
         await status.edit("📤 Uploading 0%", force=True)
         async with _typing(context, chat_id):
             with ProgressFile(path, status, label="📤 Uploading") as pf:
@@ -731,28 +661,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             pass
         return
 
-    # ---- quality selection ----
-    if data.startswith("dl|"):
-        try:
-            _, quality, token = data.split("|", 2)
-        except ValueError:
-            return
-        url = PENDING.pop(token, None)
-        if not url:
-            try:
-                await q.edit_message_text("⌛ Link expired, send it again.")
-            except BadRequest:
-                pass
-            return
 
-        status = StatusHandle(bot=context.bot, chat_id=chat_id, message_id=msg_id)
-        is_group = (q.message and q.message.chat and q.message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP))
-        reply_to = None  # we are *the* reply panel in groups, no need to re-reply
-
-        if INSTA_RE.search(url) and ig_client:
-            asyncio.create_task(dl_ig(status, context, url, chat_id, reply_to=None))
-        else:
-            asyncio.create_task(dl_ytdlp(status, context, url, quality, chat_id, reply_to=None))
 
 
 # ------------------------------------------------------------------ #
