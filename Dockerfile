@@ -3,5 +3,7 @@ RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY bot-7.py cookies.txt ./
-CMD ["python", "bot-7.py"]
+COPY bot-7.py cookies.txt main.py ./
+# Expose port (Railway supplies $PORT env)
+EXPOSE $PORT
+CMD ["uvicorn", "main:fastapi_app", "--host", "0.0.0.0", "--port", "${PORT}"]
