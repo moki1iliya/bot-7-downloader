@@ -331,28 +331,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await update.message.reply_text("Send a link to download.", reply_markup=main_panel(uid))
         return
 
-    token = uuid.uuid4().hex[:10]
-    PENDING[token] = url
-    is_group = chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
-    panel = group_quality_panel(token) if is_group else quality_panel(token)
-
-    if is_group:
-        # reply to the user's message so it stays tidy
-        try:
-            await update.message.reply_text(
-                f"Link received from {update.effective_user.first_name or 'user'}.\n"
-                f"Choose quality:",
-                reply_markup=panel,
-            )
-        except Forbidden:
-            log.warning("No permission to post in group %s", chat.id)
+    status_msg = await update.message.reply_text("⏳")
+    status = StatusHandle(bot=context.bot, chat_id=chat.id, message_id=status_msg.message_id)
+    if INSTA_RE.search(url) and ig_client:
+        asyncio.create_task(dl_ig(status, context, url, chat.id))
     else:
-        await update.message.reply_text("Choose quality:", reply_markup=panel)
+        asyncio.create_task(dl_ytdlp(status, context, url, "best", chat.id))
 
 
-# ------------------------------------------------------------------ #
-# Download: Instagram (instagrapi)
-# ------------------------------------------------------------------ #
 async def dl_ig(
     status: StatusHandle,
     context: ContextTypes.DEFAULT_TYPE,
@@ -479,42 +465,11 @@ async def dl_ytdlp(
     if HAS_ARIA2:
         opts["external_downloader"] = "aria2c"
         opts["external_downloader_args"] = ["-x", "16", "-s", "16", "-k", "1M"]
-    if quality == "audio":
-        opts["format"] = "bestaudio/best"
-        opts["postprocessors"] = [
-            {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
-        ]
-    elif quality in ("1080", "720", "480"):
-        # Cap video at the requested height, with proper upper-bound math:
-        # - 1080: pick best video <= 1080p (could be 720p if no 1080 exists)
-        # - 720:  pick best video <= 720p  (will never pick 1080p)
-        # - 480:  pick best video <= 480p  (will never pick 720p/1080p)
-        # We use an EXACT ceiling via a sorted merge with -S so smaller files don't
-        # accidentally win over bigger-but-still-under-cap streams.
-        opts["format"] = (
-            f"bv*[height<={quality}][ext=mp4]+ba[ext=m4a]/"
-            f"bv*[height<={quality}]+ba/b"
-            f"[height<={quality}]/"
-            f"b[height<={quality}]"
-        )
-        # Force yt-dlp to actually prefer the highest resolution under the cap
-        opts["format_sort"] = ["res:1080", "res:720", "res:480", "res:240"]
-        opts["format_sort_force"] = False  # don't override site-specific sort
-        # If 1080p is requested but only 720p exists, prefer mp4 muxed (not webm)
-        if quality == "1080":
-            opts["format"] = (
-                "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/"
-                "bv*[height<=1080]+ba[ext=m4a]/"
-                "bv*[height<=1080]+ba/"
-                "b[height<=1080]"
-            )
-    else:
-        # "best" — no height cap, but prefer mp4/m4a mux to keep file small
-        opts["format"] = (
-            "bv*[ext=mp4]+ba[ext=m4a]/"
-            "bv*[ext=mp4]+ba/"
-            "bv*+ba/b"
-        )
+    opts["format"] = (
+        "bv*[ext=mp4]+ba[ext=m4a]/"
+        "bv*[ext=mp4]+ba/"
+        "bv*+ba/b"
+    )
 
     try:
         def do_dl():
